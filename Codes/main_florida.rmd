@@ -83,67 +83,57 @@ a T=132 >> p=67 ratio needed for reliable precision matrix estimation in Stage 2
 We use `rgee` (R interface to Google Earth Engine) instead of `blackmarbler`
 to avoid GDAL HDF5 driver issues on Windows. GEE runs the spatial aggregation
 server-side and returns a plain dataframe.
-
-**One-time setup:** `install.packages("rgee")`, then in the console run
-`reticulate::py_install("earthengine-api", pip = TRUE)` to install the
-Python dependency into the existing env (avoids `ee_install()` conflicts
-with uv-managed Python on Windows).
-
-```{r ntl-initialize}
-# Point reticulate at the correct Python before loading rgee
-reticulate::use_condaenv("r-reticulate", required = TRUE)
-library(rgee)
-```
 ```{r}
-ee_Authenticate()  
-```
-```{r}
-ee_Initialize()
+nighttime_lights <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Raw/florida_ntl_2013_2023.csv")
+head(nighttime_lights)
 ```
 
-```{r ntl-download}
-florida_ee <- sf_as_ee(florida |> select(GEOID, NAME))
-
-viirs <- ee$ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG") |>
-  ee$ImageCollection$filterDate("2013-01-01", "2023-12-31") |>
-  ee$ImageCollection$select("avg_rad")
-
-# reduceRegions called on image object directly (compatible with new API)
-extract_month <- function(img) {
-  img     <- ee$Image(img)
-  date    <- img$date()$format("YYYY-MM-dd")
-  reduced <- img$reduceRegions(
-    collection = florida_ee,
-    reducer    = ee$Reducer$mean(),
-    scale      = 500
-  )
-  reduced$map(function(f) f$set("date", date))
-}
-
-results <- viirs$map(extract_month)$flatten()
-ntl_raw <- ee_as_sf(results, via = "drive") |> st_drop_geometry()
-
-cat("Dimensions:", nrow(ntl_raw), "x", ncol(ntl_raw), "\n")
-print(head(ntl_raw))
-```
-
-```{r ntl-load}
-ntl_raw <- readRDS("../Data/Processed/ntl_raw.rds")
-
-# ee_extract returns one column per image named by date (e.g. X202201)
-# Pivot to long format: one row per county x month
-ntl <- ntl_raw |>
-  pivot_longer(
-    cols      = starts_with("X"),
-    names_to  = "date",
-    values_to = "ntl_mean"
+```{r ntl-merge}
+florida_data <- nighttime_lights |>
+  rename(ntl_mean = mean) |>
+  mutate(
+    GEOID = as.character(GEOID),
+    date  = as.Date(date)
   ) |>
-  mutate(date = as.Date(paste0(sub("X", "", date), "01"), "%Y%m%d")) |>
-  rename(GEOID = GEOID, county = NAME) |>
+  left_join(florida_counties |> mutate(GEOID = as.character(GEOID)),
+            by = "GEOID") |>
+  select(GEOID, NAME = NAME.x, date, ntl_mean, lon, lat) |>
   arrange(GEOID, date)
 
-glimpse(ntl)
-cat("\nRows:", nrow(ntl),
-    "— expected 67 x 132 =", 67 * 132, "\n")
-print(head(ntl, 10))
+cat("Rows:", nrow(florida_data), "— expected", 67 * 132, "\n")
+head(florida_data)
+```
+
+```{r ntl-map}
+# Pick one month to visualize
+snapshot <- florida_data |> filter(date == as.Date("2019-06-01"))
+
+# Join ntl values back to sf geometry for plotting
+florida_ntl <- florida |>
+  left_join(snapshot, by = "GEOID")
+
+ggplot(florida_ntl) +
+  geom_sf(aes(fill = ntl_mean), color = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(option = "inferno", name = "Radiance\n(nW/cm²/sr)") +
+  labs(title = "Nighttime Lights — Florida Counties",
+       subtitle = "June 2019") +
+  theme_void()
+```
+
+```{r}
+summary(florida_data$ntl_mean)
+```
+```{r}
+write.csv(florida_data,
+          file = "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Processed/florida_data.csv",
+          row.names = FALSE)
+```
+```{r}
+florida_data <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Processed/florida_data.csv")
+head(florida_data)
+```
+## Hurricane Data
+```{r}
+hurricane_data <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Raw/DisasterDeclarationsSummaries.csv")
+head(hurricane_data)
 ```
