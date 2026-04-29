@@ -25,7 +25,7 @@ library(glasso)
 library(huge)       # optional: BIC/EBIC tuning for rho selection
 library(ggplot2)
 library(viridis) 
-library(terra)
+library(geojsonio)
 ```
 
 ---
@@ -63,14 +63,17 @@ florida_counties <- florida |>
   select(GEOID, NAME, lon, lat) |>
   arrange(NAME)
 
-View(florida_counties)
+head(florida_counties)
 ```
 ```{r}
 write.csv(florida_counties,
           file = "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Processed/florida_counties.csv",
           row.names = FALSE)
 ```
-
+```{r}
+florida_counties <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Processed/florida_counties.csv")
+head(florida_counties)
+```
 ## Nighttime Lights (VIIRS — Google Earth Engine)
 
 Date range: Jan 2013 – Dec 2023 (132 months). Covers all three hurricanes
@@ -90,29 +93,35 @@ with uv-managed Python on Windows).
 # Point reticulate at the correct Python before loading rgee
 reticulate::use_condaenv("r-reticulate", required = TRUE)
 library(rgee)
+```
+```{r}
+ee_Authenticate()  
+```
+```{r}
 ee_Initialize()
-ee_Authenticate()  # Follow prompts to authenticate with Google account
 ```
 
-```{r ntl-download, eval=FALSE}
-# VIIRS monthly nighttime lights on GEE
-# Band "avg_rad": average radiance (nW/cm²/sr), cloud-masked
+```{r ntl-download}
+florida_ee <- sf_as_ee(florida |> select(GEOID, NAME))
+
 viirs <- ee$ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG") |>
   ee$ImageCollection$filterDate("2013-01-01", "2023-12-31") |>
   ee$ImageCollection$select("avg_rad")
 
-# Convert Florida sf object to Earth Engine FeatureCollection
-florida_ee <- sf_as_ee(florida |> select(GEOID, NAME))
+# reduceRegions called on image object directly (compatible with new API)
+extract_month <- function(img) {
+  img     <- ee$Image(img)
+  date    <- img$date()$format("YYYY-MM-dd")
+  reduced <- img$reduceRegions(
+    collection = florida_ee,
+    reducer    = ee$Reducer$mean(),
+    scale      = 500
+  )
+  reduced$map(function(f) f$set("date", date))
+}
 
-# Extract mean radiance per county per image (month)
-# scale = 500 matches VIIRS native resolution (~463m)
-ntl_raw <- ee_extract(
-  x     = viirs,
-  y     = florida_ee,
-  fun   = ee$Reducer$mean(),
-  scale = 500,
-  sf    = FALSE
-)
+results <- viirs$map(extract_month)$flatten()
+ntl_raw <- ee_as_sf(results, via = "drive") |> st_drop_geometry()
 
 cat("Dimensions:", nrow(ntl_raw), "x", ncol(ntl_raw), "\n")
 print(head(ntl_raw))
