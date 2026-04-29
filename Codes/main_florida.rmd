@@ -1,0 +1,137 @@
+---
+title: "Hurricane Economic Propagation in Florida"
+author: "Pietro Fraccaroli, Gimelgo Xirinda"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Install Missing Packages
+
+```{r install, eval=FALSE}
+# Run this chunk once to install everything, then set eval=FALSE
+cran_pkgs <- c(
+  "sf", "spdep", "tigris",
+  "blackmarbler",
+  "tidyverse", "lubridate",
+  "plm",
+  "glasso", "huge",
+  "ggplot2", "viridis"
+)
+
+install.packages(setdiff(cran_pkgs, rownames(installed.packages())))
+```
+
+---
+
+## Libraries
+
+```{r libraries}
+# Spatial
+library(sf)         # simple features: read/manipulate shapefiles
+library(spdep)      # spatial dependence: contiguity matrix, spatial lags
+library(tigris)     # download Census TIGER/Line shapefiles (counties, etc.)
+
+# Nighttime lights (NASA Black Marble VIIRS — VNP46A3 monthly product)
+library(blackmarbler)
+
+# Data wrangling
+library(tidyverse)
+library(lubridate)
+
+# Panel regression
+library(plm)        # fixed-effects panel models
+
+# Graphical Lasso
+library(glasso)
+library(huge)       # optional: BIC/EBIC tuning for rho selection
+
+# Visualization
+library(ggplot2)
+library(viridis)    # color scale for maps
+```
+
+---
+
+## Florida Counties
+
+```{r florida-counties}
+# Download Florida county boundaries from Census TIGER/Line
+# tigris caches the shapefile after first download
+options(tigris_use_cache = TRUE)
+
+florida <- counties(state = "FL", cb = TRUE, year = 2020) |>
+  st_transform(crs = 4326)   # WGS84
+
+# Quick check
+cat("Number of counties:", nrow(florida), "\n")
+cat("Columns:", paste(names(florida), collapse = ", "), "\n")
+
+# Preview map
+ggplot(florida) +
+  geom_sf(fill = "lightblue", color = "white", linewidth = 0.3) +
+  labs(title = "Florida Counties (n = 67)") +
+  theme_minimal()
+```
+
+```{r florida-counties-df}
+# Compute county centroids and build a clean reference dataframe
+florida_counties <- florida |>
+  st_centroid() |>
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2]
+  ) |>
+  st_drop_geometry() |>
+  select(GEOID, NAME, lon, lat) |>
+  arrange(NAME)
+
+View(florida_counties)
+```
+```{r}
+# save the dataframe of florida counties for later use
+saveRDS(florida_counties, file = "../Data/florida_counties.rds")
+```
+---
+
+## Nighttime Lights (VIIRS Black Marble)
+
+```{r ntl-setup}
+# NASA Earthdata bearer token — register free at https://urs.earthdata.nasa.gov
+# Store your token in .Renviron as: NASA_TOKEN=your_token_here
+# Then load it with:
+nasa_token <- Sys.getenv("NASA_TOKEN")
+
+# Date range: cover Irma (2017), Michael (2018), Ian (2022)
+date_start <- "2015-01-01"
+date_end   <- "2023-12-01"
+```
+
+```{r ntl-download, eval=FALSE}
+# Download monthly nighttime light radiance (VNP46A3) for Florida counties
+# blackmarbler extracts and aggregates to the polygon level (mean radiance per county)
+ntl_raw <- bm_extract(
+  roi                = florida,                 # sf object — one row per county
+  product_id         = "VNP46A3",               # monthly composite
+  date               = seq(as.Date(date_start), as.Date(date_end), by = "month"),
+  bearer             = nasa_token,
+  variable           = "AllAngle_Composite_Snow_Free",  # cloud-free monthly mean
+  aggregation_fun    = mean,
+  output_location_type = "memory"
+)
+
+# Save to disk to avoid re-downloading
+saveRDS(ntl_raw, file = "../Data/ntl_raw.rds")
+```
+
+```{r ntl-load}
+# Load cached data (run the download chunk once, then use this)
+# ntl_raw <- readRDS("../Data/ntl_raw.rds")
+
+# Expected structure: one row per county × month
+# Columns: GEOID, date, ntl_mean (radiance)
+# glimpse(ntl_raw)
+```
