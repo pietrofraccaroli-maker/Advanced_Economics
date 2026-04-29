@@ -8,23 +8,6 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
-
-## Install Missing Packages
-
-```{r install, eval=FALSE}
-# Run this chunk once to install everything, then set eval=FALSE
-cran_pkgs <- c(
-  "sf", "spdep", "tigris",
-  "blackmarbler",
-  "tidyverse", "lubridate",
-  "plm",
-  "glasso", "huge",
-  "ggplot2", "viridis"
-)
-
-install.packages(setdiff(cran_pkgs, rownames(installed.packages())))
-```
-
 ---
 
 ## Libraries
@@ -34,24 +17,15 @@ install.packages(setdiff(cran_pkgs, rownames(installed.packages())))
 library(sf)         # simple features: read/manipulate shapefiles
 library(spdep)      # spatial dependence: contiguity matrix, spatial lags
 library(tigris)     # download Census TIGER/Line shapefiles (counties, etc.)
-
-# Nighttime lights (NASA Black Marble VIIRS — VNP46A3 monthly product)
 library(blackmarbler)
-
-# Data wrangling
 library(tidyverse)
 library(lubridate)
-
-# Panel regression
 library(plm)        # fixed-effects panel models
-
-# Graphical Lasso
 library(glasso)
 library(huge)       # optional: BIC/EBIC tuning for rho selection
-
-# Visualization
 library(ggplot2)
-library(viridis)    # color scale for maps
+library(viridis) 
+library(terra)
 ```
 
 ---
@@ -92,46 +66,75 @@ florida_counties <- florida |>
 View(florida_counties)
 ```
 ```{r}
-# save the dataframe of florida counties for later use
-saveRDS(florida_counties, file = "../Data/florida_counties.rds")
+write.csv(florida_counties,
+          file = "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Processed/florida_counties.csv",
+          row.names = FALSE)
 ```
----
 
-## Nighttime Lights (VIIRS Black Marble)
+## Nighttime Lights (VIIRS — Google Earth Engine)
 
-```{r ntl-setup}
-# NASA Earthdata bearer token — register free at https://urs.earthdata.nasa.gov
-# Store your token in .Renviron as: NASA_TOKEN=your_token_here
-# Then load it with:
-nasa_token <- Sys.getenv("NASA_TOKEN")
+Date range: Jan 2013 – Dec 2023 (132 months). Covers all three hurricanes
+(Irma 2017, Michael 2018, Ian 2022) with ample pre/post baseline, and gives
+a T=132 >> p=67 ratio needed for reliable precision matrix estimation in Stage 2.
 
-# Date range: cover Irma (2017), Michael (2018), Ian (2022)
-date_start <- "2015-01-01"
-date_end   <- "2023-12-01"
+We use `rgee` (R interface to Google Earth Engine) instead of `blackmarbler`
+to avoid GDAL HDF5 driver issues on Windows. GEE runs the spatial aggregation
+server-side and returns a plain dataframe.
+
+**One-time setup:** `install.packages("rgee")`, then in the console run
+`reticulate::py_install("earthengine-api", pip = TRUE)` to install the
+Python dependency into the existing env (avoids `ee_install()` conflicts
+with uv-managed Python on Windows).
+
+```{r ntl-initialize}
+# Point reticulate at the correct Python before loading rgee
+reticulate::use_condaenv("r-reticulate", required = TRUE)
+library(rgee)
+ee_Initialize()
+ee_Authenticate()  # Follow prompts to authenticate with Google account
 ```
 
 ```{r ntl-download, eval=FALSE}
-# Download monthly nighttime light radiance (VNP46A3) for Florida counties
-# blackmarbler extracts and aggregates to the polygon level (mean radiance per county)
-ntl_raw <- bm_extract(
-  roi                = florida,                 # sf object — one row per county
-  product_id         = "VNP46A3",               # monthly composite
-  date               = seq(as.Date(date_start), as.Date(date_end), by = "month"),
-  bearer             = nasa_token,
-  variable           = "AllAngle_Composite_Snow_Free",  # cloud-free monthly mean
-  aggregation_fun    = mean,
-  output_location_type = "memory"
+# VIIRS monthly nighttime lights on GEE
+# Band "avg_rad": average radiance (nW/cm²/sr), cloud-masked
+viirs <- ee$ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG") |>
+  ee$ImageCollection$filterDate("2013-01-01", "2023-12-31") |>
+  ee$ImageCollection$select("avg_rad")
+
+# Convert Florida sf object to Earth Engine FeatureCollection
+florida_ee <- sf_as_ee(florida |> select(GEOID, NAME))
+
+# Extract mean radiance per county per image (month)
+# scale = 500 matches VIIRS native resolution (~463m)
+ntl_raw <- ee_extract(
+  x     = viirs,
+  y     = florida_ee,
+  fun   = ee$Reducer$mean(),
+  scale = 500,
+  sf    = FALSE
 )
 
-# Save to disk to avoid re-downloading
-saveRDS(ntl_raw, file = "../Data/ntl_raw.rds")
+cat("Dimensions:", nrow(ntl_raw), "x", ncol(ntl_raw), "\n")
+print(head(ntl_raw))
 ```
 
 ```{r ntl-load}
-# Load cached data (run the download chunk once, then use this)
-# ntl_raw <- readRDS("../Data/ntl_raw.rds")
+ntl_raw <- readRDS("../Data/Processed/ntl_raw.rds")
 
-# Expected structure: one row per county × month
-# Columns: GEOID, date, ntl_mean (radiance)
-# glimpse(ntl_raw)
+# ee_extract returns one column per image named by date (e.g. X202201)
+# Pivot to long format: one row per county x month
+ntl <- ntl_raw |>
+  pivot_longer(
+    cols      = starts_with("X"),
+    names_to  = "date",
+    values_to = "ntl_mean"
+  ) |>
+  mutate(date = as.Date(paste0(sub("X", "", date), "01"), "%Y%m%d")) |>
+  rename(GEOID = GEOID, county = NAME) |>
+  arrange(GEOID, date)
+
+glimpse(ntl)
+cat("\nRows:", nrow(ntl),
+    "— expected 67 x 132 =", 67 * 132, "\n")
+print(head(ntl, 10))
 ```
