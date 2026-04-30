@@ -133,7 +133,21 @@ florida_data <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Eco
 head(florida_data)
 ```
 ## Hurricane Data
-```{r}
+
+```{r hurricane-load}
 hurricane_data <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Raw/DisasterDeclarationsSummaries.csv")
-head(hurricane_data)
+```
+
+```{r}
+# Tutti gli uragani in Florida senza filtro IA
+hurricane_data |>
+  filter(state == "FL", incidentType == "Hurricane") |>
+  group_by(disasterNumber, declarationTitle, incidentBeginDate) |>
+  summarise(n_counties = n(),
+            ia = max(iaProgramDeclared),
+            pa = max(paProgramDeclared),
+            .groups = "drop") |>
+  arrange(incidentBeginDate) |>
+  print(n = 50)
+
 ```
