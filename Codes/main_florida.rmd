@@ -197,6 +197,13 @@ florida_data <- florida_data |>
 cat("Panel rows:", nrow(florida_data), "— expected", 67 * 120, "\n")
 cat("hurricane_hit == 1:", sum(florida_data$hurricane_hit), "\n")
 head(florida_data)
+
+write.csv(florida_data,
+          file = paste0(
+            "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/",
+            "Data/Processed/florida_data.csv"
+          ),
+          row.names = FALSE)
 ```
 
 ```{r hurricane-maps}
@@ -237,4 +244,187 @@ for (i in seq_len(nrow(hurricanes))) {
   ggsave(fname, plot = p, width = 6, height = 5, dpi = 150)
   cat("Saved:", fname, "\n")
 }
+```
+
+---
+
+## Stage 1 — Panel Regression
+
+### Contiguity Matrix
+
+We are adding a contiguity matrix to capture the spatial spillover. If we omit this we find banal connection between confinant counties.
+
+```{r contiguity}
+florida <- counties(state = "FL", cb = TRUE, year = 2020) |>
+  st_transform(crs = 4326)
+
+# Rook contiguity (shared border only)
+nb <- poly2nb(florida, queen = FALSE)
+W  <- nb2mat(nb, style = "B", zero.policy = TRUE)
+
+# Rows/cols ordered by florida$GEOID
+rownames(W) <- florida$GEOID
+colnames(W) <- florida$GEOID
+
+cat("W dimensions:", dim(W), "\n")
+cat("Avg neighbours per county:", mean(rowSums(W)), "\n")
+```
+
+### Spatial Lag
+
+```{r spatial-lag}
+florida_data <- read.csv(paste0(
+  "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/",
+  "Data/Processed/florida_data.csv"
+))
+
+florida_data <- florida_data |>
+  mutate(GEOID = as.character(GEOID), date = as.Date(date))
+
+# Wide matrix: rows = months, cols = counties (ordered as in W)
+county_order <- colnames(W)
+dates        <- sort(unique(florida_data$date))
+
+hit_matrix <- florida_data |>
+  select(GEOID, date, hurricane_hit) |>
+  pivot_wider(names_from = GEOID, values_from = hurricane_hit) |>
+  arrange(date) |>
+  select(all_of(county_order)) |>
+  as.matrix()
+
+# Spatial lag: for each month, W %*% hit_vector
+lag_matrix <- hit_matrix %*% t(W)
+
+# Back to long format
+lag_long <- as.data.frame(lag_matrix) |>
+  mutate(date = dates) |>
+  pivot_longer(-date, names_to = "GEOID", values_to = "hurricane_lag")
+
+florida_data <- florida_data |>
+  left_join(lag_long, by = c("GEOID", "date"))
+
+cat("Spatial lag range:", range(florida_data$hurricane_lag), "\n")
+head(florida_data)
+```
+```{r}
+View(florida_data)
+```
+### Panel Regression
+
+```{r panel-regression}
+pdata <- pdata.frame(florida_data, index = c("GEOID", "date"))
+
+model <- plm(
+  ntl_mean ~ hurricane_hit + hurricane_lag,
+  data   = pdata,
+  effect = "twoways",
+  model  = "within"
+)
+
+summary(model)
+
+florida_data$residuals <- as.numeric(residuals(model))
+cat("Residuals range:", range(florida_data$residuals), "\n")
+```
+
+---
+
+## Stage 2 — Graphical Lasso on Residuals
+
+First matrix with residuals, composed by 120 rows (months) and 67 columns (counties).
+```{r glasso-matrix}
+# Build T x 67 residual matrix (rows = months, cols = counties)
+county_order <- colnames(W)   # same ordering as contiguity matrix
+dates        <- sort(unique(florida_data$date))
+
+resid_matrix <- florida_data |>
+  select(GEOID, date, residuals) |>
+  pivot_wider(names_from = GEOID, values_from = residuals) |>
+  arrange(date) |>
+  select(all_of(county_order)) |>
+  as.matrix()
+
+cat("Residual matrix dimensions:", dim(resid_matrix), "\n")   # 120 x 67
+cat("Any NA:", anyNA(resid_matrix), "\n")
+```
+
+Here we tune the glasso penalty parameter rho using EBIC using the huge package, which evaluates a grid of rho values and selects the one that minimizes EBIC.
+```{r glasso-tune}
+# Estimate sample covariance matrix (67 x 67)
+S <- cov(resid_matrix)
+
+# Tune rho via EBIC (Extended BIC) using the huge package
+# huge.select returns the rho that minimises EBIC over a grid
+huge_out    <- huge(resid_matrix, method = "glasso", nlambda = 30, verbose = FALSE)
+huge_sel    <- huge.select(huge_out, criterion = "ebic", verbose = FALSE)
+rho_optimal <- huge_sel$opt.lambda
+
+cat("Optimal rho (EBIC):", round(rho_optimal, 4), "\n")
+```
+
+Optimal rho (EBIC): 0.0996 
+Here we fit the glasso with the selected rho, where it estimates the sparse precision matrix Theta. 
+We shrink small values to zero.
+```{r glasso-fit}
+# Fit graphical lasso at the selected rho
+fit   <- glasso(S, rho = rho_optimal)
+Theta <- fit$wi   # 67 x 67 precision matrix
+
+# Adjacency matrix: 1 where Theta[i,j] != 0 (off-diagonal)
+adj_glasso <- (abs(Theta) > 1e-6) * 1L
+diag(adj_glasso) <- 0L
+rownames(adj_glasso) <- county_order
+colnames(adj_glasso) <- county_order
+
+cat("Edges in glasso network:", sum(adj_glasso) / 2, "\n")
+cat("Edges in contiguity W:  ", sum(W) / 2, "\n")
+```
+
+```{r glasso-compare}
+# Reorder W to match adj_glasso (same county_order)
+W_ordered <- W[county_order, county_order]
+
+# Edges in glasso but NOT in contiguity = candidate non-geographic channels
+non_geo  <- adj_glasso * (1L - W_ordered)
+geo_only <- W_ordered  * (1L - adj_glasso)
+both     <- adj_glasso * W_ordered
+
+cat("Edges in both (geo + economic):", sum(both) / 2, "\n")
+cat("Edges only in glasso (non-geo):", sum(non_geo) / 2, "\n")
+cat("Edges only in W (geo, not glasso):", sum(geo_only) / 2, "\n")
+```
+
+```{r glasso-map}
+# Map non-geographic glasso edges as lines between county centroids
+florida_counties <- read.csv(paste0(
+  "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/",
+  "Data/Processed/florida_counties.csv"
+)) |> mutate(GEOID = as.character(GEOID))
+
+# Build edge list for non-geographic connections
+edge_list <- which(non_geo == 1, arr.ind = TRUE)
+edge_list <- edge_list[edge_list[, 1] < edge_list[, 2], ]   # upper triangle only
+
+edges_df <- data.frame(
+  from = rownames(non_geo)[edge_list[, 1]],
+  to   = colnames(non_geo)[edge_list[, 2]]
+) |>
+  left_join(florida_counties |> select(GEOID, lon, lat),
+            by = c("from" = "GEOID")) |>
+  rename(lon_from = lon, lat_from = lat) |>
+  left_join(florida_counties |> select(GEOID, lon, lat),
+            by = c("to" = "GEOID")) |>
+  rename(lon_to = lon, lat_to = lat)
+
+florida_sf <- counties(state = "FL", cb = TRUE, year = 2020) |>
+  st_transform(crs = 4326)
+
+ggplot() +
+  geom_sf(data = florida_sf, fill = "grey95", color = "grey70", linewidth = 0.2) +
+  geom_segment(data = edges_df,
+               aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to),
+               color = "steelblue", linewidth = 0.5, alpha = 0.7) +
+  labs(title = "Non-Geographic Economic Linkages (Graphical Lasso)",
+       subtitle = "Edges not explained by geographic contiguity") +
+  theme_void()
 ```
