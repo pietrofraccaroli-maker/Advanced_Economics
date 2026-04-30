@@ -132,14 +132,15 @@ write.csv(florida_data,
 florida_data <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Processed/florida_data.csv")
 head(florida_data)
 ```
+
 ## Hurricane Data
 
 ```{r hurricane-load}
 hurricane_data <- read.csv("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Data/Raw/DisasterDeclarationsSummaries.csv")
 ```
 
-```{r}
-# Tutti gli uragani in Florida senza filtro IA
+```{r hurricane-summary}
+# All Florida hurricanes without IA filter — for reference
 hurricane_data |>
   filter(state == "FL", incidentType == "Hurricane") |>
   group_by(disasterNumber, declarationTitle, incidentBeginDate) |>
@@ -149,5 +150,91 @@ hurricane_data |>
             .groups = "drop") |>
   arrange(incidentBeginDate) |>
   print(n = 50)
+```
+```{r fema-indicator}
+fema_hit <- hurricane_data |>
+  filter(
+    state          == "FL",
+    incidentType   == "Hurricane",
+    fipsCountyCode != 0,
+    grepl("HURRICANE", declarationTitle, ignore.case = TRUE)
+  ) |>
+  mutate(
+    GEOID = paste0("12", sprintf("%03d", fipsCountyCode)),
+    date  = as.Date(format(as.Date(substr(incidentBeginDate, 1, 10)), "%Y-%m-01"))
+  ) |>
+  filter(date >= as.Date("2014-01-01"), date <= as.Date("2023-12-31")) |>
+  select(GEOID, date, disasterNumber, declarationTitle) |>
+  distinct(GEOID, date, .keep_all = TRUE) |>
+  mutate(hurricane_hit = 1L)
 
+cat("FEMA hurricane-hit records:", nrow(fema_hit), "\n")
+fema_hit |>
+  group_by(disasterNumber, declarationTitle) |>
+  summarise(n_counties = n(), .groups = "drop") |>
+  arrange(disasterNumber) |>
+  print()
+```
+
+```{r hurricane-panel}
+florida_data <- read.csv(paste0(
+  "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/",
+  "Data/Processed/florida_data.csv"
+))
+
+florida_data <- florida_data |>
+  mutate(
+    GEOID = as.character(GEOID),
+    date  = as.Date(date)
+  ) |>
+  left_join(
+    fema_hit |> mutate(GEOID = as.character(GEOID)) |>
+      select(GEOID, date, hurricane_hit),
+    by = c("GEOID", "date")
+  ) |>
+  mutate(hurricane_hit = replace_na(hurricane_hit, 0L))
+
+cat("Panel rows:", nrow(florida_data), "— expected", 67 * 120, "\n")
+cat("hurricane_hit == 1:", sum(florida_data$hurricane_hit), "\n")
+head(florida_data)
+```
+
+```{r hurricane-maps}
+florida <- counties(state = "FL", cb = TRUE, year = 2020) |>
+  st_transform(crs = 4326)
+
+fig_dir <- paste0(
+  "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Figures/"
+)
+
+hurricanes <- fema_hit |>
+  distinct(disasterNumber, declarationTitle, date)
+
+for (i in seq_len(nrow(hurricanes))) {
+  dis_num  <- hurricanes$disasterNumber[i]
+  title    <- hurricanes$declarationTitle[i]
+  dis_date <- hurricanes$date[i]
+
+  hit_geoids <- fema_hit |>
+    filter(disasterNumber == dis_num) |>
+    pull(GEOID)
+
+  map_data <- florida |>
+    mutate(
+      GEOID = as.character(GEOID),
+      hit   = GEOID %in% hit_geoids
+    )
+
+  p <- ggplot(map_data) +
+    geom_sf(aes(fill = hit), color = "white", linewidth = 0.2) +
+    scale_fill_manual(values = c("FALSE" = "lightgrey", "TRUE" = "red"),
+                      guide = "none") +
+    labs(title = title,
+         subtitle = format(dis_date, "%B %Y")) +
+    theme_void()
+
+  fname <- paste0(fig_dir, "hurricane_", dis_num, ".png")
+  ggsave(fname, plot = p, width = 6, height = 5, dpi = 150)
+  cat("Saved:", fname, "\n")
+}
 ```
