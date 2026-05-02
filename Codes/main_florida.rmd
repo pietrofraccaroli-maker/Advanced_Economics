@@ -432,9 +432,13 @@ p_glasso <- ggplot() +
   geom_segment(data = edges_df,
                aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to),
                color = "steelblue", linewidth = 0.5, alpha = 0.7) +
-  labs(title = "Non-Geographic Economic Linkages (Graphical Lasso)",
-       subtitle = "Edges not explained by geographic contiguity") +
-  theme_void()
+  labs(title = NULL, subtitle = NULL, x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "grey85", linewidth = 0.3),
+    axis.text  = element_text(size = 7),
+    axis.title = element_text(size = 8)
+  )
 
 p_glasso
 
