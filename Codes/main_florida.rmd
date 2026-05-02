@@ -151,12 +151,20 @@ hurricane_data |>
   arrange(incidentBeginDate) |>
   print(n = 50)
 ```
+```{r}
+hurricane_data |>
+  filter(state == "FL", incidentType == "Hurricane") |>
+  distinct(disasterNumber) |>
+  nrow()
+
+```
 ```{r fema-indicator}
 fema_hit <- hurricane_data |>
   filter(
     state          == "FL",
     incidentType   == "Hurricane",
     fipsCountyCode != 0,
+    disasterNumber >= 4000,
     grepl("HURRICANE", declarationTitle, ignore.case = TRUE)
   ) |>
   mutate(
@@ -427,4 +435,164 @@ ggplot() +
   labs(title = "Non-Geographic Economic Linkages (Graphical Lasso)",
        subtitle = "Edges not explained by geographic contiguity") +
   theme_void()
+```
+
+```{r glasso-degree}
+# County names lookup
+county_names <- florida_counties |> select(GEOID, NAME)
+
+# Degree in the full glasso network (all 66 edges)
+degree_full <- data.frame(
+  GEOID  = county_order,
+  degree_total = rowSums(adj_glasso)
+) |> left_join(county_names, by = "GEOID")
+
+# Degree in non-geographic network only (60 edges)
+degree_nongeo <- data.frame(
+  GEOID        = county_order,
+  degree_nongeo = rowSums(non_geo)
+) |> left_join(county_names, by = "GEOID")
+
+degree_summary <- degree_full |>
+  left_join(degree_nongeo |> select(GEOID, degree_nongeo), by = "GEOID") |>
+  arrange(desc(degree_nongeo)) |>
+  select(NAME, degree_total, degree_nongeo)
+
+print(degree_summary)
+```
+
+```{r glasso-degree-map}
+# Choropleth: shade each county by its non-geographic degree
+florida_sf <- counties(state = "FL", cb = TRUE, year = 2020) |>
+  st_transform(crs = 4326) |>
+  mutate(GEOID = as.character(GEOID)) |>
+  left_join(degree_nongeo |> select(GEOID, degree_nongeo), by = "GEOID")
+
+ggplot(florida_sf) +
+  geom_sf(aes(fill = degree_nongeo), color = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(option = "plasma", name = "Non-geo\ndegree") +
+  labs(title = "Non-Geographic Economic Connectivity (Graphical Lasso)",
+       subtitle = "Number of non-contiguous counties each county is linked to") +
+  theme_void()
+```
+
+This code give us a list of the strongest non-geographic connections. Considering also the partial correlation.
+```{r glasso-strength}
+# Partial correlation matrix from precision matrix
+# partial_corr[i,j] = -Theta[i,j] / sqrt(Theta[i,i] * Theta[j,j])
+D    <- diag(Theta)
+Pcor <- -Theta / sqrt(outer(D, D))
+diag(Pcor) <- 1
+
+rownames(Pcor) <- county_order
+colnames(Pcor) <- county_order
+
+# Top 20 strongest non-geographic edges by absolute partial correlation
+nongeo_idx <- which(non_geo == 1, arr.ind = TRUE)
+nongeo_idx <- nongeo_idx[nongeo_idx[, 1] < nongeo_idx[, 2], ]
+
+strength_df <- data.frame(
+  from        = county_order[nongeo_idx[, 1]],
+  to          = county_order[nongeo_idx[, 2]],
+  partial_cor = Pcor[nongeo_idx]
+) |>
+  left_join(county_names, by = c("from" = "GEOID")) |> rename(name_from = NAME) |>
+  left_join(county_names, by = c("to"   = "GEOID")) |> rename(name_to   = NAME) |>
+  mutate(abs_pcor = abs(partial_cor)) |>
+  arrange(desc(abs_pcor)) |>
+  select(name_from, name_to, partial_cor, abs_pcor)
+
+print(strength_df)
+```
+
+Geographic connections.
+```{r glasso-geo-map}
+# Map the 6 edges that are BOTH in glasso AND in W (geographic + economic)
+geo_idx <- which(both == 1, arr.ind = TRUE)
+geo_idx <- geo_idx[geo_idx[, 1] < geo_idx[, 2], ]
+
+geo_edges_df <- data.frame(
+  from = rownames(both)[geo_idx[, 1]],
+  to   = colnames(both)[geo_idx[, 2]]
+) |>
+  left_join(florida_counties |> select(GEOID, lon, lat),
+            by = c("from" = "GEOID")) |>
+  rename(lon_from = lon, lat_from = lat) |>
+  left_join(florida_counties |> select(GEOID, lon, lat),
+            by = c("to" = "GEOID")) |>
+  rename(lon_to = lon, lat_to = lat)
+
+ggplot() +
+  geom_sf(data = florida_sf, fill = "grey95", color = "grey70", linewidth = 0.2) +
+  geom_segment(data = geo_edges_df,
+               aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to),
+               color = "darkred", linewidth = 1, alpha = 0.8) +
+  labs(title = "Geographic + Economic Linkages (Graphical Lasso)",
+       subtitle = "Edges in both glasso network and contiguity matrix (n = 6)") +
+  theme_void()
+```
+
+---
+
+## Validazione — Residui di Orange nel Tempo
+
+```{r orange-residuals}
+hurricane_dates <- data.frame(
+  date  = as.Date(c("2017-09-01", "2018-10-01", "2022-09-01")),
+  label = c("Irma", "Michael", "Ian")
+)
+
+florida_data |>
+  mutate(GEOID = as.character(GEOID), date = as.Date(date)) |>
+  filter(NAME == "Orange") |>
+  ggplot(aes(x = date, y = residuals)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_vline(data = hurricane_dates,
+             aes(xintercept = date),
+             color = "red", linetype = "dashed", linewidth = 0.8) +
+  geom_text(data = hurricane_dates,
+            aes(x = date, y = max(florida_data$residuals[florida_data$NAME == "Orange"], na.rm = TRUE),
+                label = label),
+            vjust = -0.3, hjust = -0.1, color = "red", size = 3.5) +
+  labs(title = "Residuals NTL — Orange County",
+       subtitle = "Red lines = hurricane dates (Irma 2017, Michael 2018, Ian 2022)",
+       x = NULL, y = "Residual") +
+  theme_minimal()
+```
+
+---
+
+## Validation — Extended Regression with Glasso Network Spillover
+
+```{r glasso-spillover}
+# For each county-month, count how many non-geographic glasso neighbors were hit
+glasso_lag_matrix <- florida_data |>
+  mutate(GEOID = as.character(GEOID), date = as.Date(date)) |>
+  select(GEOID, date, hurricane_hit) |>
+  pivot_wider(names_from = GEOID, values_from = hurricane_hit) |>
+  arrange(date) |>
+  select(all_of(county_order)) |>
+  as.matrix()
+
+glasso_lag_counts <- glasso_lag_matrix %*% non_geo
+
+glasso_lag_long <- as.data.frame(glasso_lag_counts) |>
+  mutate(date = sort(unique(as.Date(florida_data$date)))) |>
+  pivot_longer(-date, names_to = "GEOID", values_to = "glasso_neighbor_hit")
+
+florida_data2 <- florida_data |>
+  mutate(GEOID = as.character(GEOID), date = as.Date(date)) |>
+  left_join(glasso_lag_long, by = c("GEOID", "date"))
+
+pdata2 <- pdata.frame(florida_data2, index = c("GEOID", "date"))
+
+model2 <- plm(
+  ntl_mean ~ hurricane_hit + hurricane_lag + glasso_neighbor_hit,
+  data   = pdata2,
+  effect = "twoways",
+  model  = "within"
+)
+
+summary(model2)
 ```
