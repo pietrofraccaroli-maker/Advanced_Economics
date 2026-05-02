@@ -427,7 +427,7 @@ edges_df <- data.frame(
 florida_sf <- counties(state = "FL", cb = TRUE, year = 2020) |>
   st_transform(crs = 4326)
 
-ggplot() +
+p_glasso <- ggplot() +
   geom_sf(data = florida_sf, fill = "grey95", color = "grey70", linewidth = 0.2) +
   geom_segment(data = edges_df,
                aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to),
@@ -435,6 +435,13 @@ ggplot() +
   labs(title = "Non-Geographic Economic Linkages (Graphical Lasso)",
        subtitle = "Edges not explained by geographic contiguity") +
   theme_void()
+
+p_glasso
+
+ggsave(
+  "C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Figures/glasso_map.png",
+  plot = p_glasso, width = 7, height = 5, dpi = 150
+)
 ```
 
 ```{r glasso-degree}
@@ -595,4 +602,40 @@ model2 <- plm(
 )
 
 summary(model2)
+```
+
+```{r}
+summary(florida_data2$glasso_neighbor_hit)
+summary(florida_data2$hurricane_lag)
+summary(florida_data2$hurricane_hit)
+summary(florida_data2$ntl_mean)
+
+```
+
+```{r hurricane-lag-map}
+florida_sf <- counties(state = "FL", cb = TRUE, year = 2020) |>
+  st_transform(crs = 4326) |>
+  mutate(GEOID = as.character(GEOID))
+
+avg_lag <- florida_data |>
+  mutate(GEOID = as.character(GEOID)) |>
+  group_by(GEOID) |>
+  summarise(avg_hurricane_lag = mean(hurricane_lag, na.rm = TRUE))
+
+florida_lag_map <- florida_sf |>
+  left_join(avg_lag, by = "GEOID")
+
+p_lag <- ggplot(florida_lag_map) +
+  geom_sf(aes(fill = avg_hurricane_lag), color = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(option = "magma", name = "Avg\nneighbors\nhit") +
+  labs(title = "Average Number of Neighboring Counties Hit by Hurricane",
+       subtitle = "Mean hurricane_lag per county (2014–2023)") +
+  theme_void()
+
+p_lag
+
+ggsave(
+  paste0("C:/Users/Utente/OneDrive/Documenti/GitHub/Advanced_Economics/Figures/hurricane_lag_map.png"),
+  plot = p_lag, width = 7, height = 5, dpi = 150
+)
 ```
