@@ -570,6 +570,8 @@ florida_data |>
        subtitle = "Red lines = hurricane dates (Irma 2017, Michael 2018, Ian 2022)",
        x = NULL, y = "Residual") +
   theme_minimal()
+
+ggsave("figures/orange_residuals.png", width = 8, height = 4, dpi = 300)
 ```
 
 ---
